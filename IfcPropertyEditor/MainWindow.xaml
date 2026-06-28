@@ -1,0 +1,30 @@
+﻿<Window x:Class="IfcPropertyEditor.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="IFC Property Editor" Height="700" Width="1100">
+
+    <DockPanel>
+        <ToolBar DockPanel.Dock="Top">
+            <Button Content="Открыть IFC" Click="OpenIfc_Click" Width="120"/>
+            <Button Content="Сохранить" Click="SaveIfc_Click" Width="120" Margin="10,0,0,0"/>
+            <Button Content="Сохранить как" Click="SaveAsIfc_Click"  Width="120"  Margin="10,0,0,0"/>
+        </ToolBar>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="350"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <TreeView x:Name="EntitiesTree"
+                      Grid.Column="0"
+                      SelectedItemChanged="EntitiesTree_SelectedItemChanged"/>
+
+            <TreeView x:Name="PropertiesTree"
+          Grid.Column="1"
+          Margin="5"
+          MouseDoubleClick="PropertiesTree_MouseDoubleClick"/>
+            
+        </Grid>
+    </DockPanel>
+</Window>
