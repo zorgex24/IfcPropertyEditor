@@ -20,6 +20,7 @@ namespace IfcPropertyEditor
         {
             NewValue = ValueTextBox.Text;
             DialogResult = true;
+
         }
 
         private void Cancel_Click(object sender, RoutedEventArgs e)

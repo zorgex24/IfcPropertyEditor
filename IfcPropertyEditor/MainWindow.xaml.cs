@@ -173,7 +173,11 @@ namespace IfcPropertyEditor
             {
                 var node = CreatePropertyNode(property.Name, property.Value);
 
-                if (TryGetHeaderEditTarget(property.Name, out var sourceObject, out var sourcePropertyName))
+                // Разрешаем редактировать только FileDescription.Description.
+                // FileName.OriginatingSystem отдельно не редактируем:
+                // он синхронизируется из ApplicationFullName + Version.
+                if (property.Name == "FileDescription.Description" &&
+                    TryGetHeaderEditTarget(property.Name, out var sourceObject, out var sourcePropertyName))
                 {
                     node.Tag = new EditablePropertyNode
                     {
@@ -187,6 +191,27 @@ namespace IfcPropertyEditor
 
                 PropertiesTree.Items.Add(node);
             }
+
+            var fileDataNode = new TreeViewItem
+            {
+                Header = "File Data",
+                IsExpanded = true
+            };
+
+            var applicationNode = CreateApplicationNode();
+
+            if (applicationNode != null)
+                fileDataNode.Items.Add(applicationNode);
+
+            fileDataNode.Items.Add(CreatePropertyNode(
+                "Path",
+                _currentFilePath ?? ""));
+
+            fileDataNode.Items.Add(CreatePropertyNode(
+                "Units",
+                GetProjectUnits()));
+
+            PropertiesTree.Items.Add(fileDataNode);
         }
 
         private void ShowEntityPropertiesGrouped(IfcRoot entity)
@@ -255,6 +280,13 @@ namespace IfcPropertyEditor
                 {
                     Header = ToIfcText(propertySet.Name, "PropertySet"),
                     IsExpanded = true
+                };
+
+                psetNode.Tag = new PropertySetNode
+                {
+                    Relation = relProps,
+                    PropertySet = propertySet,
+                    OwnerEntity = ifcObject
                 };
 
                 foreach (var property in propertySet.HasProperties)
@@ -461,9 +493,12 @@ namespace IfcPropertyEditor
             if (item.Tag is not EditablePropertyNode editable)
                 return;
 
-            // 1. Редактирование File Header
+            // 1. Редактирование File Header.
+            // Сейчас разрешаем редактировать только FileName.OriginatingSystem.
             if (editable.IsHeaderProperty)
             {
+                
+
                 var window = new EditPropertyWindow(editable.Name, editable.CurrentValue)
                 {
                     Owner = this
@@ -474,6 +509,9 @@ namespace IfcPropertyEditor
 
                 if (window.NewValue == editable.CurrentValue)
                     return;
+
+                _hasUnsavedChanges = true;
+                UpdateWindowTitle();
 
                 var prop = editable.SourceObject
                     .GetType()
@@ -487,46 +525,36 @@ namespace IfcPropertyEditor
 
                 try
                 {
-                    var currentObject = prop.GetValue(editable.SourceObject);
-
-                    if (prop.PropertyType == typeof(string))
+                    using (var txn = _model.BeginTransaction("Edit header/application property"))
                     {
-                        prop.SetValue(editable.SourceObject, window.NewValue);
-                    }
-                    else if (currentObject is System.Collections.IList list)
-                    {
-                        list.Clear();
+                        SetIfcPropertyValue(editable.SourceObject, prop, window.NewValue);
 
-                        var parts = window.NewValue
-                            .Split(',')
-                            .Select(x => x.Trim())
-                            .Where(x => !string.IsNullOrWhiteSpace(x));
+                        if (editable.SourceObject is Xbim.Ifc2x3.UtilityResource.IfcApplication)
+                            SyncOriginatingSystemFromApplication();
 
-                        foreach (var part in parts)
-                            list.Add(part);
-                    }
-                    else
-                    {
-                        MessageBox.Show($"Редактирование свойства типа {prop.PropertyType.Name} пока не поддерживается.");
-                        return;
+                        txn.Commit();
                     }
 
                     editable.CurrentValue = window.NewValue;
-                    item.Header = CreatePropertyHeader(editable.Name, window.NewValue);
-
                     _hasUnsavedChanges = true;
 
-                    MessageBox.Show("Свойство File Header изменено. Не забудьте сохранить файл.");
+                    ShowFileHeaderProperties();
+
+                    
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Ошибка изменения File Header:\n" + ex.Message);
+                    MessageBox.Show(
+                        "Ошибка изменения File Header:\n" +
+                        ex.Message + "\n\n" +
+                        "Inner:\n" +
+                        ex.InnerException?.Message);
                 }
 
                 return;
             }
 
-            // 2. Редактирование IfcPropertySingleValue
+            // 2. Редактирование обычного IfcPropertySingleValue из PropertySet.
             if (editable.SourceObject is not IfcPropertySingleValue singleValue)
                 return;
 
@@ -545,6 +573,9 @@ namespace IfcPropertyEditor
             if (newValue == currentValue)
                 return;
 
+            _hasUnsavedChanges = true;
+            UpdateWindowTitle();
+
             try
             {
                 using (var txn = _model.BeginTransaction("Edit property value"))
@@ -557,7 +588,7 @@ namespace IfcPropertyEditor
 
                 item.Header = CreatePropertyHeader(editable.Name, newValue);
 
-                MessageBox.Show("Значение изменено в модели. Не забудьте сохранить файл.");
+                
             }
             catch (Exception ex)
             {
@@ -671,6 +702,9 @@ namespace IfcPropertyEditor
                 _hasUnsavedChanges = false;
 
                 MessageBox.Show("IFC-файл сохранен как новая копия.");
+                _hasUnsavedChanges = false;
+                UpdateWindowTitle();
+
             }
             catch (Exception ex)
             {
@@ -678,7 +712,230 @@ namespace IfcPropertyEditor
             }
         }
 
-    }
 
+        private string GetApplicationName()
+        {
+            if (_model == null)
+                return "";
+
+            return _model.Header.FileName.OriginatingSystem ?? "";
+
+        }
+
+        private string GetProjectUnits()
+        {
+            if (_model == null)
+                return "";
+
+            var project = _model.Instances
+                .OfType<IfcProject>()
+                .FirstOrDefault();
+
+            if (project?.UnitsInContext == null)
+                return "";
+
+            return project.UnitsInContext.ToString() ?? "";
+        }
+
+        private void UpdateIfcApplicationName(string newValue)
+        {
+            if (_model == null)
+                return;
+
+            var applications = _model.Instances
+                .OfType<Xbim.Ifc2x3.UtilityResource.IfcApplication>()
+                .ToList();
+
+            using (var txn = _model.BeginTransaction("Update IfcApplication"))
+            {
+                foreach (var app in applications)
+                {
+                    app.ApplicationFullName = newValue;
+                }
+
+                txn.Commit();
+            }
+        }
+
+        private TreeViewItem? CreateApplicationNode()
+        {
+            if (_model == null)
+                return null;
+
+            var app = _model.Instances
+                .OfType<Xbim.Ifc2x3.UtilityResource.IfcApplication>()
+                .FirstOrDefault();
+
+            if (app == null)
+                return null;
+
+            var appNode = new TreeViewItem
+            {
+                Header = "Application",
+                IsExpanded = true
+            };
+
+            AddEditableApplicationProperty(appNode, app, "ApplicationFullName", app.ApplicationFullName);
+            AddEditableApplicationProperty(appNode, app, "Version", app.Version);
+            AddEditableApplicationProperty(appNode, app, "ApplicationIdentifier", app.ApplicationIdentifier);
+
+            return appNode;
+        }
+
+        private void AddEditableApplicationProperty(TreeViewItem parentNode, Xbim.Ifc2x3.UtilityResource.IfcApplication app, string propertyName, string value)
+        {
+            var node = CreatePropertyNode(propertyName, value);
+
+            node.Tag = new EditablePropertyNode
+            {
+                Name = propertyName,
+                SourceObject = app,
+                SourcePropertyName = propertyName,
+                CurrentValue = value,
+                IsHeaderProperty = true
+            };
+
+            parentNode.Items.Add(node);
+        }
+
+        private void SetIfcPropertyValue(object sourceObject, System.Reflection.PropertyInfo prop, string newValue)
+        {
+            if (prop.PropertyType == typeof(string))
+            {
+                prop.SetValue(sourceObject, newValue);
+                return;
+            }
+
+            if (prop.PropertyType == typeof(IfcLabel))
+            {
+                prop.SetValue(sourceObject, new IfcLabel(newValue));
+                return;
+            }
+
+            if (prop.PropertyType == typeof(IfcIdentifier))
+            {
+                prop.SetValue(sourceObject, new IfcIdentifier(newValue));
+                return;
+            }
+
+            var currentObject = prop.GetValue(sourceObject);
+
+            if (currentObject is System.Collections.IList list)
+            {
+                list.Clear();
+                list.Add(newValue);
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"Редактирование свойства типа {prop.PropertyType.Name} пока не поддерживается.");
+        }
+        private void SyncOriginatingSystemFromApplication()
+        {
+            if (_model == null)
+                return;
+
+            var app = _model.Instances
+                .OfType<Xbim.Ifc2x3.UtilityResource.IfcApplication>()
+                .FirstOrDefault();
+
+            if (app == null)
+                return;
+
+            var appName = app.ApplicationFullName.ToString();
+            var version = app.Version.ToString();
+
+            var result = string.IsNullOrWhiteSpace(version)
+                ? appName
+                : $"{appName} Build {version}";
+
+            _model.Header.FileName.OriginatingSystem = result;
+        }
+
+        private void UpdateWindowTitle()
+        {
+            Title = _hasUnsavedChanges
+                ? "IFC Property Editor *"
+                : "IFC Property Editor";
+        }
+
+        private void PropertiesTree_PreviewMouseRightButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            var item = FindParentTreeViewItem(e.OriginalSource as DependencyObject);
+
+            if (item == null)
+                return;
+
+            item.IsSelected = true;
+
+            if (item.Tag is not PropertySetNode psetNode)
+                return;
+
+            var menu = new ContextMenu();
+
+            var deleteItem = new MenuItem
+            {
+                Header = "Удалить PropertySet"
+            };
+
+            deleteItem.Click += (s, args) =>
+            {
+                DeletePropertySet(psetNode);
+            };
+
+            menu.Items.Add(deleteItem);
+            item.ContextMenu = menu;
+        }
+
+        private TreeViewItem? FindParentTreeViewItem(DependencyObject? source)
+        {
+            while (source != null)
+            {
+                if (source is TreeViewItem item)
+                    return item;
+
+                source = System.Windows.Media.VisualTreeHelper.GetParent(source);
+            }
+
+            return null;
+        }
+
+        private void DeletePropertySet(PropertySetNode node)
+        {
+            if (_model == null)
+                return;
+
+            var result = MessageBox.Show(
+                $"Удалить PropertySet \"{ToIfcText(node.PropertySet.Name, "PropertySet")}\" у выбранного элемента?",
+                "Удаление PropertySet",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (result != MessageBoxResult.Yes)
+                return;
+
+            try
+            {
+                using (var txn = _model.BeginTransaction("Delete PropertySet relation"))
+                {
+                    node.Relation.RelatedObjects.Remove(node.OwnerEntity);
+                    txn.Commit();
+                }
+
+                _hasUnsavedChanges = true;
+                UpdateWindowTitle();
+
+                if (EntitiesTree.SelectedItem is TreeViewItem selectedEntityNode &&
+                    selectedEntityNode.Tag is IfcRoot entity)
+                {
+                    ShowEntityPropertiesGrouped(entity);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ошибка удаления PropertySet:\n" + ex.Message);
+            }
+        }
+    }
 
 }

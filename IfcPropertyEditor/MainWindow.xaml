@@ -23,7 +23,8 @@
             <TreeView x:Name="PropertiesTree"
           Grid.Column="1"
           Margin="5"
-          MouseDoubleClick="PropertiesTree_MouseDoubleClick"/>
+          MouseDoubleClick="PropertiesTree_MouseDoubleClick"
+          PreviewMouseRightButtonDown="PropertiesTree_PreviewMouseRightButtonDown"/>
             
         </Grid>
     </DockPanel>
